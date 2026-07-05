@@ -337,27 +337,57 @@ cs.onchange=renderCalc;renderCalc();
 // ---- BATCH ----
 const bs=document.getElementById('b-color');
 codes.forEach(c=>bs.innerHTML+=`<option>${c}</option>`);
+let OVERRIDE={};  // оператор гараар оруулсан жинхэнэ хэмжээ
 function renderBatch(){
   const code=bs.value,qty=+document.getElementById('b-qty').value||100,cycle=+document.getElementById('b-cycle').value;
   const use=batchUsage(code,qty,cycle),keys=Object.keys(use);
   const box=document.getElementById('b-preview');
   box.innerHTML=keys.length?keys.map(k=>{
-    const after=bal(k)-use[k],low=after<=INV[k].thr;
-    return `<div class="use-line"><div class="nm">${k}</div><div style="text-align:right">
-      <div class="amt">−${fmt2(use[k])} ${INV[k].unit}</div>
-      <div style="font-size:11px;font-family:var(--mono);color:${low?'var(--red)':'var(--ink-3)'}">үлдэнэ ${fmt2(after)}</div>
-    </div></div>`;}).join(''):'<div class="empty">Бодис бүртгэлгүй</div>';
+    const calc=use[k];                                  // тооцоолсон
+    const actual=(OVERRIDE[k]!=null)?OVERRIDE[k]:calc;   // жинхэнэ (засвал)
+    const after=bal(k)-actual,low=after<=INV[k].thr;
+    const diff=actual-calc;
+    const edited=OVERRIDE[k]!=null&&Math.abs(diff)>0.001;
+    return `<div class="use-line" style="align-items:center">
+      <div class="nm">${k}${edited?` <span style="font-size:10px;color:var(--amber);font-family:var(--mono)">${diff>0?'+':''}${fmt2(diff)} зөрүү</span>`:''}</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="text-align:right">
+          <div style="font-size:10px;color:var(--ink-3);font-family:var(--mono)">тооцоо ${fmt2(calc)}</div>
+          <div style="font-size:11px;font-family:var(--mono);color:${low?'var(--red)':'var(--ink-3)'}">үлдэнэ ${fmt2(after)}</div>
+        </div>
+        <input type="number" step="0.01" data-chem="${k}" value="${fmt2(actual)}" class="use-inp"
+          style="width:76px;text-align:right;font-family:var(--mono);font-size:13px;color:var(--coral);padding:6px 8px">
+        <span style="font-size:11px;color:var(--ink-3);min-width:20px">${INV[k].unit}</span>
+      </div></div>`;}).join(''):'<div class="empty">Бодис бүртгэлгүй</div>';
+  // wire up input edits — update inline without full re-render (keep focus)
+  box.querySelectorAll('.use-inp').forEach(inp=>{
+    inp.addEventListener('input',e=>{
+      const k=e.target.dataset.chem, v=parseFloat(e.target.value);
+      if(!isNaN(v))OVERRIDE[k]=v; else delete OVERRIDE[k];
+    });
+    inp.addEventListener('blur',renderBatch);  // засаж дуусаад шинэчлэх
+  });
   document.getElementById('b-cost').innerHTML=fmt(costParts(code).total*qty*10)+' <small>₮</small>';
 }
-bs.onchange=renderBatch;document.getElementById('b-qty').oninput=renderBatch;document.getElementById('b-cycle').onchange=renderBatch;renderBatch();
+function resetOverride(){OVERRIDE={};}
+bs.onchange=()=>{resetOverride();renderBatch();};
+document.getElementById('b-qty').oninput=()=>{resetOverride();renderBatch();};
+document.getElementById('b-cycle').onchange=()=>{resetOverride();renderBatch();};
+renderBatch();
 document.getElementById('b-run').onclick=()=>{
   const code=bs.value,qty=+document.getElementById('b-qty').value||100,cycle=+document.getElementById('b-cycle').value;
   const op=document.getElementById('b-op').value.trim()||'—',use=batchUsage(code,qty,cycle);
-  const short=Object.keys(use).filter(k=>bal(k)<use[k]);
+  // actual = override эсвэл тооцоолсон
+  const actual={}; Object.keys(use).forEach(k=>actual[k]=(OVERRIDE[k]!=null)?OVERRIDE[k]:use[k]);
+  const short=Object.keys(actual).filter(k=>bal(k)<actual[k]);
   if(short.length){toast('Хүрэлцэхгүй: '+short.slice(0,3).join(', '),true);return;}
-  Object.keys(use).forEach(k=>INV[k].out+=use[k]);
-  HISTORY.unshift({code,qty,op,cycle,cost:costParts(code).total*qty*10,time:new Date()});
-  toast(`${code} · ${qty}кг партия хийгдлээ`);renderBatch();
+  // тооцоолсон ба жинхэнэ зөрүүг хадгална
+  const moves=Object.keys(actual).map(k=>({chem:k,calc:use[k],actual:actual[k],diff:actual[k]-use[k],unit:INV[k].unit}));
+  Object.keys(actual).forEach(k=>INV[k].out+=actual[k]);
+  HISTORY.unshift({code,qty,op,cycle,cost:costParts(code).total*qty*10,time:new Date(),moves});
+  const edited=moves.filter(m=>Math.abs(m.diff)>0.001).length;
+  toast(`${code} · ${qty}кг партия хийгдлээ${edited?` (${edited} бодис засварласан)`:''}`);
+  resetOverride();renderBatch();
 };
  
 // ---- STORE ----
@@ -416,12 +446,21 @@ function renderProduct(){
 function renderHist(){
   const b=document.getElementById('h-body');
   if(!HISTORY.length){b.innerHTML='<div class="empty">Одоогоор партия хийгээгүй байна</div>';return;}
-  b.innerHTML=HISTORY.map(h=>{
+  b.innerHTML=HISTORY.map((h,i)=>{
     const t=h.time.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
-    return `<div class="hist-row"><span class="code"><span class="swatch" style="background:${swatch(h.code)}"></span>${h.code}</span>
-      <span class="meta">${h.op} · ${h.cycle} удаа цайр · ${t}</span>
+    const edited=(h.moves||[]).filter(m=>Math.abs(m.diff)>0.001);
+    const editBadge=edited.length?`<span style="font-size:10px;color:var(--amber);font-family:var(--mono);margin-left:6px">✎ ${edited.length} засвар</span>`:'';
+    const detail=edited.length?`<div id="hd-${i}" style="display:none;grid-column:1/-1;margin-top:8px;padding:10px 12px;background:var(--panel-2);border-radius:8px">
+      ${edited.map(m=>`<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0">
+        <span>${m.chem}</span>
+        <span style="font-family:var(--mono)"><span style="color:var(--ink-3)">тооцоо ${fmt2(m.calc)}</span> → <span style="color:var(--coral)">жинхэнэ ${fmt2(m.actual)}</span> <span style="color:var(--amber)">(${m.diff>0?'+':''}${fmt2(m.diff)} ${m.unit})</span></span>
+      </div>`).join('')}</div>`:'';
+    return `<div class="hist-row" ${edited.length?`style="cursor:pointer" onclick="const d=document.getElementById('hd-${i}');d.style.display=d.style.display==='none'?'block':'none'"`:''}>
+      <span class="code"><span class="swatch" style="background:${swatch(h.code)}"></span>${h.code}</span>
+      <span class="meta">${h.op} · ${h.cycle} удаа цайр · ${t}${editBadge}</span>
       <span style="font-family:var(--mono);font-size:13px;color:var(--ink)">${h.qty} кг</span>
-      <span style="font-family:var(--mono);font-size:13px;color:var(--cyan)">${fmt(h.cost)} ₮</span></div>`;}).join('');
+      <span style="font-family:var(--mono);font-size:13px;color:var(--cyan)">${fmt(h.cost)} ₮</span>
+      ${detail}</div>`;}).join('');
 }
  
  
@@ -468,4 +507,3 @@ renderBleach();
 // clock
 function tick(){document.getElementById('clock').textContent=new Date().toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}).replace(',','');}
 tick();setInterval(tick,30000);
-</script>
